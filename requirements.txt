@@ -1,0 +1,6 @@
+PyQt6
+yt-dlp
+ytmusicapi
+google-api-python-client
+google-auth-oauthlib
+qdarkstyle
