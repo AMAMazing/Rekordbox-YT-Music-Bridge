@@ -7,12 +7,12 @@ import threading
 
 class Downloader(QThread):
     progress_update = pyqtSignal(str, str, str)
-    download_finished = pyqtSignal(str, bool, str)
+    download_finished = pyqtSignal(str, bool, str)  # videoId, success, message
     estimation_update = pyqtSignal(str)
     overall_progress = pyqtSignal(int)
     all_downloads_finished = pyqtSignal()
 
-    def __init__(self, tracks_to_download, output_paths, sort_option, max_workers=5):
+    def __init__(self, tracks_to_download, output_paths, sort_option, max_workers=3):
         super().__init__()
         self.tracks_with_paths = list(zip(tracks_to_download, output_paths))
         self.sort_option = sort_option
@@ -60,8 +60,9 @@ class Downloader(QThread):
         elif self.sort_option == "Upload Date":
             num_digits = len(str(self.total_tracks))
             filename_template = f"{str(index + 1).zfill(num_digits)}_{track_title}_{artists}"
-        else:
-            filename_template = f"{track_title}_{artists}"
+        else: # Date Added is the default
+            num_digits = len(str(self.total_tracks))
+            filename_template = f"{str(index + 1).zfill(num_digits)}_{track_title}_{artists}"
         
         safe_filename = "".join([c for c in filename_template if c.isalpha() or c.isdigit() or c in (' ', '.', '_', '-', '(', ')', ',')]).rstrip()
         output_template = os.path.join(output_path, safe_filename + '.%(ext)s')
@@ -104,7 +105,7 @@ class Downloader(QThread):
         
         with self.lock:
             self.completed_tracks += 1
-            if self.completed_tracks > 0: # Avoid division by zero
+            if self.completed_tracks > 0:
                 self.cumulative_time += (end_time - start_time)
                 
                 progress_percent = int((self.completed_tracks / self.total_tracks) * 100)

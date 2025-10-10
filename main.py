@@ -51,6 +51,7 @@ class SyncThread(QThread):
             if new_data and 'error' not in new_data:
                 updated_playlists[playlist_id] = new_data
                 updated_playlists[playlist_id]['is_private'] = is_private
+            QApplication.processEvents()
         self.sync_finished.emit(updated_playlists)
 
 # --- Dialogs ---
@@ -176,7 +177,7 @@ class EditMicroPlaylistDialog(QDialog):
         self.artist_list = QListWidget()
         self.artist_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
         self.artist_list.addItems(self.all_artist_names)
-        self.filter_artists("") # To initially select artists
+        self.filter_artists("")
         self.artist_list.itemSelectionChanged.connect(self.update_selection)
         self.layout.addWidget(self.artist_list)
 
@@ -258,9 +259,11 @@ class MainWindow(QMainWindow):
         self.playlists_file = "playlists.json"
         self.config_file = "config.json"
         self.config = {}
+        self.local_files = set()
         
         self.setup_ui()
         self.load_config()
+        self.scan_download_directory()
         self.load_playlists()
         self.update_login_button_state()
         if self.youtube_handler.is_authenticated():
@@ -330,9 +333,10 @@ class MainWindow(QMainWindow):
         self.login_logout_button = QPushButton()
         self.login_logout_button.clicked.connect(self.toggle_login_logout)
         controls_layout.addWidget(self.login_logout_button)
+        
         controls_layout.addWidget(QLabel("Sort by:"))
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(["Track Name", "Artist Name", "Upload Date", "Date Added"])
+        self.sort_combo.addItems(["Date Added", "Track Name", "Artist Name", "Upload Date"])
         controls_layout.addWidget(self.sort_combo)
         self.download_button = QPushButton("Download Selected")
         self.download_button.clicked.connect(self.start_download)
@@ -361,6 +365,35 @@ class MainWindow(QMainWindow):
     def save_config(self):
         with open(self.config_file, 'w') as f:
             json.dump(self.config, f, indent=4)
+
+    def scan_download_directory(self):
+        self.local_files.clear()
+        download_dir = self.config.get("download_directory")
+        if download_dir and os.path.exists(download_dir):
+            for root, _, files in os.walk(download_dir):
+                for file in files:
+                    if file.endswith(".mp3"):
+                        self.local_files.add(file)
+
+    def is_track_downloaded(self, track, track_index, total_tracks):
+        track_title = track.get('title', 'N/A')
+        artists_list = [a['name'].replace(' - Topic', '').strip() for a in track.get('artists', []) if 'name' in a]
+        artists = ', '.join(artists_list)
+
+        possible_filenames = []
+        for sort_option in ["Track Name", "Artist Name", "Upload Date", "Date Added"]:
+            if sort_option == "Track Name":
+                filename_template = f"{track_title}_{artists}"
+            elif sort_option == "Artist Name":
+                filename_template = f"{artists}_{track_title}"
+            else:
+                num_digits = len(str(total_tracks))
+                filename_template = f"{str(track_index + 1).zfill(num_digits)}_{track_title}_{artists}"
+            
+            safe_filename = self.sanitize_filename(filename_template) + ".mp3"
+            if safe_filename in self.local_files:
+                return True
+        return False
 
     def open_create_micro_dialog(self):
         current_item = self.playlist_tree.currentItem()
@@ -401,8 +434,7 @@ class MainWindow(QMainWindow):
                 microplaylist = mp
                 break
         
-        if not microplaylist: 
-            return
+        if not microplaylist: return
 
         all_tracks = self.playlists.get(parent_id, {}).get('tracks', [])
         dialog = EditMicroPlaylistDialog(parent_id, microplaylist, all_tracks, self.microplaylist_handler, self)
@@ -423,16 +455,35 @@ class MainWindow(QMainWindow):
             self.display_tracks(self.playlist_tree.currentItem(), None)
 
     def refresh_playlist_tree(self):
-        self.synced_playlists_item.takeChildren()
+        current_selection = self.playlist_tree.currentItem()
+        selected_id = None
+        if current_selection and current_selection.data(0, Qt.ItemDataRole.UserRole):
+            _, selected_id = current_selection.data(0, Qt.ItemDataRole.UserRole)
+
+        self.playlist_tree.clear()
+
+        self.synced_playlists_item = QTreeWidgetItem(self.playlist_tree)
+        self.synced_playlists_item.setText(0, "Synced Playlists")
+        self.synced_playlists_item.setFlags(self.synced_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        
+        self.user_playlists_item = QTreeWidgetItem(self.playlist_tree)
+        self.user_playlists_item.setText(0, "My YouTube Playlists")
+        self.user_playlists_item.setFlags(self.user_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        
+        new_item_to_select = None
         for p_id, p_data in self.playlists.items():
             playlist_item = QTreeWidgetItem(self.synced_playlists_item)
             playlist_item.setText(0, p_data.get('title', 'Untitled Playlist'))
             playlist_item.setData(0, Qt.ItemDataRole.UserRole, ('playlist', p_id))
+            if p_id == selected_id:
+                new_item_to_select = playlist_item
+
         if self.youtube_handler.is_authenticated():
             self.fetch_all_user_playlists()
-        else:
-            self.user_playlists_item.takeChildren()
+        
         self.playlist_tree.expandAll()
+        if new_item_to_select:
+            self.playlist_tree.setCurrentItem(new_item_to_select)
 
     def update_micro_buttons_state(self, current_item, previous_item):
         is_micro_folder = False
@@ -456,40 +507,46 @@ class MainWindow(QMainWindow):
         item_type, p_id = current.data(0, Qt.ItemDataRole.UserRole)
         if item_type != 'playlist': return
 
+        self.scan_download_directory()
+
+        all_playlist_tracks = self.playlists.get(p_id, {}).get('tracks', [])
+        total_tracks = len(all_playlist_tracks)
+
         micro_tracks_map, remaining_tracks_map = self.microplaylist_handler.segregate_tracks(self.playlists)
         
         seen_video_ids = set()
-        
+
+        def add_track_to_tree(parent_item, track, track_index):
+            if track['videoId'] in seen_video_ids:
+                return
+            seen_video_ids.add(track['videoId'])
+            
+            track_item = QTreeWidgetItem(parent_item)
+            track_item.setText(0, track.get('title', 'N/A'))
+            artists = ", ".join([a['name'].replace(' - Topic', '').strip() for a in track.get('artists', []) if 'name' in a])
+            track_item.setText(1, artists)
+            
+            status = "Downloaded" if self.is_track_downloaded(track, track_index, total_tracks) else "Not Downloaded"
+            track_item.setText(2, status)
+            track_item.setData(0, Qt.ItemDataRole.UserRole, ('track', track))
+
         parent_microplaylists = self.microplaylist_handler.get_microplaylists_for_playlist(p_id)
         valid_mps = [mp for mp in parent_microplaylists if isinstance(mp, dict)]
+        
+        track_counter = 0
         for mp in sorted(valid_mps, key=lambda x: x['name']):
             folder_item = QTreeWidgetItem(self.tracks_tree)
             folder_item.setText(0, f"📁 {mp['name']}")
             folder_item.setData(0, Qt.ItemDataRole.UserRole, ('micro_folder', (p_id, mp['name'])))
             tracks_in_folder = micro_tracks_map.get((p_id, mp['name']), [])
             for track in tracks_in_folder:
-                if track['videoId'] in seen_video_ids:
-                    continue
-                seen_video_ids.add(track['videoId'])
-                
-                track_item = QTreeWidgetItem(folder_item)
-                track_item.setText(0, track.get('title', 'N/A'))
-                artists = ", ".join([a['name'].replace(' - Topic', '').strip() for a in track.get('artists', [])])
-                track_item.setText(1, artists)
-                track_item.setText(2, "Not Downloaded")
-                track_item.setData(0, Qt.ItemDataRole.UserRole, ('track', track))
+                add_track_to_tree(folder_item, track, track_counter)
+                track_counter += 1
 
         for track in remaining_tracks_map.get(p_id, []):
-            if track['videoId'] in seen_video_ids:
-                continue
-            seen_video_ids.add(track['videoId'])
-
-            track_item = QTreeWidgetItem(self.tracks_tree)
-            track_item.setText(0, track.get('title', 'N/A'))
-            artists = ", ".join([a['name'].replace(' - Topic', '').strip() for a in track.get('artists', [])])
-            track_item.setText(1, artists)
-            track_item.setText(2, "Not Downloaded")
-            track_item.setData(0, Qt.ItemDataRole.UserRole, ('track', track))
+            add_track_to_tree(self.tracks_tree, track, track_counter)
+            track_counter += 1
+            
         self.tracks_tree.expandAll()
 
     def start_download(self):
@@ -502,37 +559,45 @@ class MainWindow(QMainWindow):
             if not output_dir: return
             self.config["download_directory"] = output_dir
             self.save_config()
+            self.scan_download_directory()
 
-        tracks_to_download, unique_ids = [], set()
+        tracks_to_download_info = []
+        unique_ids = set()
+        
+        all_playlist_tracks = self.playlists.get(self.playlist_tree.currentItem().data(0, Qt.ItemDataRole.UserRole)[1], {}).get('tracks', [])
+        total_tracks = len(all_playlist_tracks)
+
         for item in selected_items:
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if not data: continue
             
             item_type, item_data = data
             
+            def process_track(track_data, path=''):
+                video_id = track_data['videoId']
+                if video_id not in unique_ids:
+                    track_index = next((i for i, t in enumerate(all_playlist_tracks) if t['videoId'] == video_id), -1)
+                    if not self.is_track_downloaded(track_data, track_index, total_tracks):
+                        tracks_to_download_info.append({'data': track_data, 'path': path})
+                        unique_ids.add(video_id)
+
             if item_type == 'track':
-                if item_data['videoId'] not in unique_ids:
-                    tracks_to_download.append({'data': item_data, 'path': ''})
-                    unique_ids.add(item_data['videoId'])
+                process_track(item_data)
             elif item_type == 'micro_folder':
                 parent_id, micro_name = item_data
                 playlist_name = self.playlists[parent_id]['title']
-                
                 micro_path = os.path.join(output_dir, self.sanitize_filename(playlist_name), self.sanitize_filename(micro_name))
-                if not os.path.exists(micro_path):
-                    os.makedirs(micro_path)
-
                 for i in range(item.childCount()):
                     child = item.child(i)
                     _, track_data = child.data(0, Qt.ItemDataRole.UserRole)
-                    if track_data['videoId'] not in unique_ids:
-                        tracks_to_download.append({'data': track_data, 'path': micro_path})
-                        unique_ids.add(track_data['videoId'])
+                    process_track(track_data, micro_path)
 
-        if not tracks_to_download: return
+        if not tracks_to_download_info: 
+            self.status_label.setText("All selected songs are already downloaded.")
+            return
 
-        final_tracks = []
-        for track_info in tracks_to_download:
+        final_tracks_with_paths = []
+        for track_info in tracks_to_download_info:
             download_path = track_info['path']
             if not download_path:
                 current_playlist_item = self.playlist_tree.currentItem()
@@ -541,22 +606,23 @@ class MainWindow(QMainWindow):
                     if item_type == 'playlist':
                         playlist_name = self.playlists[p_id]['title']
                         download_path = os.path.join(output_dir, self.sanitize_filename(playlist_name))
-
-            if not download_path:
-                 download_path = output_dir # Fallback to base directory
+            
+            if not download_path: download_path = output_dir
 
             if not os.path.exists(download_path):
-                os.makedirs(download_path)
+                os.makedirs(download_path, exist_ok=True)
+            final_tracks_with_paths.append({'data': track_info['data'], 'path': download_path})
 
-            final_tracks.append({'data': track_info['data'], 'path': download_path})
+        tracks = [ft['data'] for ft in final_tracks_with_paths]
+        paths = [ft['path'] for ft in final_tracks_with_paths]
 
-        self.downloader = Downloader([ft['data'] for ft in final_tracks], [ft['path'] for ft in final_tracks], self.sort_combo.currentText())
+        self.downloader = Downloader(tracks, paths, self.sort_combo.currentText())
         self.downloader.progress_update.connect(self.update_track_status)
         self.downloader.estimation_update.connect(self.update_estimates)
         self.downloader.download_finished.connect(self.on_download_finished)
         self.downloader.all_downloads_finished.connect(self.on_all_downloads_finished)
         self.downloader.start()
-        self.status_label.setText("Starting download...")
+        self.status_label.setText(f"Starting download of {len(tracks)} track(s)...")
 
     def sanitize_filename(self, name):
         return re.sub(r'[\\/*?:"<>|]', "", name)
@@ -620,7 +686,9 @@ class MainWindow(QMainWindow):
 
     def sync_playlist_from_tree(self, item, column):
         if item.parent() == self.user_playlists_item:
-            data, pid, is_private = item.data(0, Qt.ItemDataRole.UserRole), item.data(0, Qt.ItemDataRole.UserRole)['id'], item.data(0, Qt.ItemDataRole.UserRole)['privacyStatus'] != 'public'
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            pid = data['id']
+            is_private = data['privacyStatus'] != 'public'
             self.status_label.setText(f"Fetching full data for {data['title']}...")
             QApplication.processEvents()
             full_data = self.youtube_handler.get_playlist_info(pid, is_private)
@@ -679,6 +747,7 @@ class MainWindow(QMainWindow):
                 if count > 0:
                     summary.append(f"'{new_data.get('title', '...')[:30]}...': {count} new song(s)")
             self.playlists[pid] = new_data
+            QApplication.processEvents()
         if summary:
             QMessageBox.information(self, "Updates Found", "\\n".join(summary))
         self.status_label.setText("Sync complete.")
@@ -696,21 +765,24 @@ class MainWindow(QMainWindow):
             iterator += 1
 
     def on_download_finished(self, video_id, success, message):
+        if success:
+            self.scan_download_directory() # Re-scan to find the new file
         iterator = QTreeWidgetItemIterator(self.tracks_tree)
         while iterator.value():
             item = iterator.value()
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if data and data[0] == 'track' and data[1]['videoId'] == video_id:
-                item.setText(2, "Completed" if success else f"Error")
+                item.setText(2, "Downloaded" if success else "Error")
                 break
             iterator += 1
     
     def on_all_downloads_finished(self):
         self.status_label.setText("All downloads finished.")
         self.downloader = None
+        self.display_tracks(self.playlist_tree.currentItem(), None)
     
     def update_estimates(self, time_str):
-        pass
+        self.estimates_label.setText(f"Estimates: {time_str}")
 
     def extract_playlist_id(self, url):
         match = re.search(r"list=([a-zA-Z0-9_-]+)", url)
