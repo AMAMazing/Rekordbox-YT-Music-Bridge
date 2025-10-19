@@ -1,9 +1,13 @@
 import os
 import time
+import re
 import yt_dlp
 from PyQt6.QtCore import QThread, pyqtSignal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class Downloader(QThread):
     progress_update = pyqtSignal(str, str, str)
@@ -64,7 +68,7 @@ class Downloader(QThread):
             num_digits = len(str(self.total_tracks))
             filename_template = f"{str(index + 1).zfill(num_digits)}_{track_title}_{artists}"
         
-        safe_filename = "".join([c for c in filename_template if c.isalpha() or c.isdigit() or c in (' ', '.', '_', '-', '(', ')', ',')]).rstrip()
+        safe_filename = re.sub(r'[\/*?:"<>|]', '_', filename_template)
         output_template = os.path.join(output_path, safe_filename + '.%(ext)s')
 
         ydl_opts = {
@@ -74,6 +78,9 @@ class Downloader(QThread):
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '320',
+            }, {
+                'key': 'FFmpegMetadata',
+                'add_metadata': True,
             }],
             'progress_hooks': [self.progress_hook],
             'nocheckcertificate': True,
@@ -82,7 +89,11 @@ class Downloader(QThread):
             'noplaylist': True,
             'retries': 10,
             'fragment_retries': 10,
-            'source_address': '0.0.0.0'
+            'source_address': '0.0.0.0',
+            'postprocessor_args': [
+                '-metadata', f'artist={artists}',
+                '-metadata', f'title={track_title}'
+            ]
         }
 
         try:
@@ -95,11 +106,14 @@ class Downloader(QThread):
                 self.download_finished.emit(video_id, True, "Download successful")
             else:
                 self.download_finished.emit(video_id, False, "File is empty or missing.")
+                logging.error(f"Post-download check failed for {track_title}: File is empty or missing at {final_filepath}")
 
         except yt_dlp.utils.DownloadError as e:
             self.download_finished.emit(video_id, False, f"Download Error: {str(e)}")
+            logging.error(f"Download Error for {track_title} ({video_id}): {e}")
         except Exception as e:
             self.download_finished.emit(video_id, False, f"Unexpected Error: {str(e)}")
+            logging.error(f"Unexpected Error for {track_title} ({video_id}): {e}")
         
         end_time = time.time()
         
@@ -133,8 +147,9 @@ class Downloader(QThread):
                     break
                 try:
                     future.result()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logging.error(f"Error processing a download future: {e}")
+
         
         if self.is_running:
             self.all_downloads_finished.emit()

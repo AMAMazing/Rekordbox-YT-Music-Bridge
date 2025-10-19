@@ -64,38 +64,26 @@ class MicroPlaylistHandler:
                 return False, "Original micro-playlist not found."
         return False, "Parent playlist not found."
 
-    def get_all_activated_artists_globally(self):
-        all_artists = set()
-        for parent_mps in self.microplaylists.values():
-            if isinstance(parent_mps, list):
-                for mp in parent_mps:
-                    # FIX: Add guard for old data format
-                    if isinstance(mp, dict) and 'artists' in mp:
-                        all_artists.update(artist.lower() for artist in mp['artists'])
-        return all_artists
-
     def segregate_tracks(self, all_synced_playlists):
-        all_activated_artists_global = self.get_all_activated_artists_globally()
-        
         micro_playlist_tracks = defaultdict(list)
         remaining_playlist_tracks = defaultdict(list)
 
         for p_id, p_data in all_synced_playlists.items():
+            parent_mps = self.microplaylists.get(p_id, [])
+            
             for track in p_data.get('tracks', []):
+                assigned_to_any_micro = False
                 track_artists_lower = {artist['name'].lower().replace(' - topic', '').strip() for artist in track.get('artists', []) if 'name' in artist}
-                
-                is_in_any_micro = not track_artists_lower.isdisjoint(all_activated_artists_global)
 
-                if is_in_any_micro:
-                    for parent_id, mps in self.microplaylists.items():
-                        if isinstance(mps, list):
-                            for mp in mps:
-                                # FIX: Add guard for old data format
-                                if isinstance(mp, dict) and 'artists' in mp and 'name' in mp:
-                                    mp_artists_lower = {artist.lower() for artist in mp['artists']}
-                                    if not track_artists_lower.isdisjoint(mp_artists_lower):
-                                        micro_playlist_tracks[(parent_id, mp['name'])].append(track)
-                else:
+                if isinstance(parent_mps, list):
+                    for mp in parent_mps:
+                        if isinstance(mp, dict) and 'artists' in mp and 'name' in mp:
+                            mp_artists_lower = {artist.lower() for artist in mp['artists']}
+                            if not track_artists_lower.isdisjoint(mp_artists_lower):
+                                micro_playlist_tracks[(p_id, mp['name'])].append(track)
+                                assigned_to_any_micro = True
+                
+                if not assigned_to_any_micro:
                     remaining_playlist_tracks[p_id].append(track)
-        
+            
         return micro_playlist_tracks, remaining_playlist_tracks
