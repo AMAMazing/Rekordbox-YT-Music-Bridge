@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QInputDialog, QFileDialog, QDialog, QLineEdit, QMessageBox, QListWidget,
     QTreeWidgetItemIterator, QDialogButtonBox, QRadioButton, QGroupBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices
 
 from youtube_handler import YouTubeHandler
@@ -395,7 +395,17 @@ class MainWindow(QMainWindow):
         
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.addWidget(QLabel("Tracks"))
+
+        tracks_header_layout = QHBoxLayout()
+        tracks_header_layout.addWidget(QLabel("Tracks"))
+        tracks_header_layout.addStretch()
+        tracks_header_layout.addWidget(QLabel("Sort by:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["Date Added", "Track Name", "Artist Name"])
+        self.sort_combo.currentIndexChanged.connect(self.sort_and_redisplay_tracks)
+        tracks_header_layout.addWidget(self.sort_combo)
+        right_layout.addLayout(tracks_header_layout)
+
         self.tracks_tree = QTreeWidget()
         self.tracks_tree.setHeaderLabels(["Track", "Artist", "Status"])
         self.tracks_tree.setColumnWidth(0, 400)
@@ -423,6 +433,10 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(settings_button)
         controls_layout.addWidget(reformat_button)
         controls_layout.addStretch()
+
+        self.logged_out_label = QLabel("Login to sync your YouTube playlists.")
+        self.logged_out_label.setStyleSheet("color: #888;")
+        controls_layout.addWidget(self.logged_out_label)
         
         self.download_button = QPushButton("Download Selected")
         self.download_button.clicked.connect(self.start_download)
@@ -458,14 +472,35 @@ class MainWindow(QMainWindow):
     
     def on_track_double_clicked(self, item, column):
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data or data[0] != 'track':
+        if not data:
             return
 
-        filepath = data[1].get('filepath')
-        if filepath and os.path.exists(filepath):
-            QDesktopServices.openUrl(f"file:/{os.path.abspath(filepath)}")
-        else:
-            self.status_label.setText("File not found. It might have been moved or deleted.")
+        item_type, item_data = data
+
+        if item_type == 'track':
+            filepath = item_data.get('filepath')
+            if filepath and os.path.exists(filepath):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(filepath)))
+            else:
+                self.status_label.setText("File not found. It might have been moved or deleted.")
+        
+        elif item_type == 'micro_folder':
+            directory_to_open = None
+            if item.childCount() > 0:
+                for i in range(item.childCount()):
+                    child_item = item.child(i)
+                    child_data = child_item.data(0, Qt.ItemDataRole.UserRole)
+                    if child_data and child_data[0] == 'track':
+                        track_info = child_data[1]
+                        if 'filepath' in track_info and os.path.exists(track_info['filepath']):
+                            directory_to_open = os.path.dirname(track_info['filepath'])
+                            break
+            
+            if directory_to_open and os.path.exists(directory_to_open):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(directory_to_open)))
+            else:
+                _, micro_name = item_data
+                self.status_label.setText(f"No downloaded files in '{micro_name}' to locate folder.")
 
     def open_settings_dialog(self):
         dialog = SettingsDialog(self.config, self)
@@ -654,6 +689,11 @@ class MainWindow(QMainWindow):
         self.edit_micro_button.setEnabled(is_micro_folder)
         self.delete_micro_button.setEnabled(is_micro_folder)
 
+    def sort_and_redisplay_tracks(self):
+        current_item = self.playlist_tree.currentItem()
+        if current_item:
+            self.display_tracks(current_item, None)
+
     def display_tracks(self, current, previous):
         is_synced_playlist = current is not None and current.parent() == self.synced_playlists_item
         self.create_micro_button.setEnabled(is_synced_playlist)
@@ -670,6 +710,24 @@ class MainWindow(QMainWindow):
 
         micro_tracks_map, remaining_tracks_map = self.microplaylist_handler.segregate_tracks(self.playlists)
         
+        sort_key = self.sort_combo.currentText()
+
+        def get_sort_key_func(track):
+            if sort_key == "Track Name":
+                return track.get('title', 'N/A').lower()
+            elif sort_key == "Artist Name":
+                artists = track.get('artists', [])
+                if artists:
+                    return artists[0].get('name', 'N/A').lower()
+                return 'N/A'
+            return None # "Date Added" is default, no key needed
+
+        def sort_tracks(tracks):
+            if sort_key == "Date Added":
+                return tracks
+            else:
+                return sorted(tracks, key=get_sort_key_func)
+
         seen_video_ids = set()
 
         def add_track_to_tree(parent_item, track, micro_name=None):
@@ -703,10 +761,10 @@ class MainWindow(QMainWindow):
             folder_item.setData(0, Qt.ItemDataRole.UserRole, ('micro_folder', (p_id, mp['name'])))
             tracks_in_folder = micro_tracks_map.get((p_id, mp['name']), [])
             
-            for track in tracks_in_folder:
+            for track in sort_tracks(tracks_in_folder):
                 add_track_to_tree(folder_item, track, mp['name'])
 
-        for track in remaining_tracks_map.get(p_id, []):
+        for track in sort_tracks(remaining_tracks_map.get(p_id, [])):
             add_track_to_tree(self.tracks_tree, track)
 
     def start_download(self):
@@ -797,10 +855,13 @@ class MainWindow(QMainWindow):
         else: self.login()
     
     def update_login_button_state(self):
-        self.login_logout_button.setText("Logout" if self.youtube_handler.is_authenticated() else "Login with Google")
+        is_auth = self.youtube_handler.is_authenticated()
+        self.login_logout_button.setText("Logout" if is_auth else "Login with Google")
+        self.logged_out_label.setVisible(not is_auth)
+        self.user_playlists_item.setHidden(not is_auth)
 
     def login(self):
-        self.status_label.setText("Attempting to log in...")
+        self.status_label.setText("Attempting to log in... Please follow the instructions in your browser.")
         self.login_thread = LoginThread(self.youtube_handler)
         self.login_thread.auth_finished.connect(self.on_login_finished)
         self.login_thread.start()
@@ -886,6 +947,9 @@ class MainWindow(QMainWindow):
                     self.tracks_tree.clear()
 
     def check_for_updates(self):
+        if not self.youtube_handler.is_authenticated():
+            self.status_label.setText("Please log in to check for updates.")
+            return
         self.status_label.setText("Checking for updates...")
         self.sync_thread = SyncThread(self.youtube_handler, self.playlists)
         self.sync_thread.sync_finished.connect(self.on_sync_finished)
@@ -903,7 +967,7 @@ class MainWindow(QMainWindow):
             self.playlists[pid] = new_data
             QApplication.processEvents()
         if summary:
-            QMessageBox.information(self, "Updates Found", "\n".join(summary))
+            QMessageBox.information(self, "Updates Found", "\\n".join(summary))
         self.status_label.setText("Sync complete.")
         self.save_playlists()
         self.refresh_playlist_tree()
