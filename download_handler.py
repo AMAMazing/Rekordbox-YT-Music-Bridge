@@ -20,7 +20,7 @@ class DownloadHandler(QThread):
     overall_progress = pyqtSignal(int)
     all_downloads_finished = pyqtSignal()
 
-    def __init__(self, tracks_to_download, file_manager, download_directory, max_workers=3):
+    def __init__(self, tracks_to_download, file_manager, download_directory, max_workers=3, cookies_file=None):
         """
         Initializes the DownloadHandler.
 
@@ -29,12 +29,14 @@ class DownloadHandler(QThread):
             file_manager (FileManager): An instance of the FileManager to handle naming and paths.
             download_directory (str): The root directory where tracks will be saved.
             max_workers (int): The number of concurrent download threads to use.
+            cookies_file (str): Path to Netscape format cookies file (optional but recommended).
         """
         super().__init__()
         self.tracks_to_download = tracks_to_download
         self.file_manager = file_manager
         self.download_directory = download_directory
         self.max_workers = max_workers
+        self.cookies_file = cookies_file
         self.is_running = True
         self.total_tracks = len(tracks_to_download)
         self.completed_tracks = 0
@@ -69,7 +71,7 @@ class DownloadHandler(QThread):
         # Generate paths and filenames using FileManager
         playlist_name = track_info.get('playlist_title', 'Unknown Playlist')
         microplaylist_name = track_info.get('microplaylist_title')
-        total_tracks_in_playlist = track_info.get('playlist_track_count', self.total_tracks) # Use playlist total if available
+        total_tracks_in_playlist = track_info.get('playlist_track_count', self.total_tracks)
         output_path = self.file_manager.get_track_directory(self.download_directory, playlist_name, microplaylist_name)
         
         if not os.path.exists(output_path):
@@ -96,12 +98,31 @@ class DownloadHandler(QThread):
             'noplaylist': True,
             'retries': 10,
             'fragment_retries': 10,
-            'source_address': '0.0.0.0',
+            'skip_unavailable_fragments': True,
+            # Enhanced anti-bot measures
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['webpage', 'configs'],
+                }
+            },
+            # User agent and headers
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
             'postprocessor_args': [
                 '-metadata', f"artist={', '.join([a['name'] for a in track_info.get('artists', [])])}",
                 '-metadata', f"title={track_info.get('title', 'N/A')}"
             ]
         }
+
+        # Add cookies if provided
+        if self.cookies_file and os.path.exists(self.cookies_file):
+            ydl_opts['cookiefile'] = self.cookies_file
+            logging.info(f"Using cookies file: {self.cookies_file}")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
