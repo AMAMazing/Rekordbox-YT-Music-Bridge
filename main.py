@@ -39,22 +39,50 @@ class FetchAllPlaylistsThread(QThread):
         playlists = self.youtube_handler.get_all_user_playlists()
         self.fetch_finished.emit(playlists)
 
-class SyncThread(QThread):
-    sync_finished = pyqtSignal(dict)
+class FullSyncThread(QThread):
+    sync_finished = pyqtSignal(dict, list)
+
     def __init__(self, youtube_handler, playlists_to_sync):
         super().__init__()
         self.youtube_handler = youtube_handler
         self.playlists_to_sync = playlists_to_sync
+
     def run(self):
+        live_user_playlists = self.youtube_handler.get_all_user_playlists()
+        if 'error' in live_user_playlists:
+            self.sync_finished.emit({}, [f"Error fetching playlists: {live_user_playlists['error']}"])
+            return
+            
+        live_playlist_map = {p['id']: p for p in live_user_playlists}
         updated_playlists = {}
-        for playlist_id, playlist_data in self.playlists_to_sync.items():
-            is_private = playlist_data.get('is_private', False)
-            new_data = self.youtube_handler.get_playlist_info(playlist_id, is_private)
+        summary = []
+        
+        for playlist_id, old_playlist_data in self.playlists_to_sync.items():
+            if playlist_id not in live_playlist_map:
+                summary.append(f"'{old_playlist_data.get('title', '...')}'': Skipped (not found in your account).")
+                continue
+
+            live_data = live_playlist_map[playlist_id]
+            is_now_private = live_data['privacyStatus'] != 'public'
+            
+            new_data = self.youtube_handler.get_playlist_info(playlist_id, is_now_private)
+            
             if new_data and 'error' not in new_data:
+                old_ids = {t['videoId'] for t in old_playlist_data.get('tracks', [])}
+                new_ids = {t['videoId'] for t in new_data.get('tracks', [])}
+                count = len(new_ids - old_ids)
+                if count > 0:
+                    summary.append(f"'{new_data.get('title', '...')[:30]}...': {count} new song(s)")
+
+                new_data['is_private'] = is_now_private
                 updated_playlists[playlist_id] = new_data
-                updated_playlists[playlist_id]['is_private'] = is_private
+            else:
+                summary.append(f"'{old_playlist_data.get('title', '...')}'': Failed to sync.")
+            
             QApplication.processEvents()
-        self.sync_finished.emit(updated_playlists)
+            
+        self.sync_finished.emit(updated_playlists, summary)
+
 
 # --- Dialogs ---
 class CreateMicroPlaylistDialog(QDialog):
@@ -255,7 +283,6 @@ class SettingsDialog(QDialog):
         self.config = current_config.copy() 
         self.layout = QVBoxLayout(self)
 
-        # Download Directory
         dir_layout = QHBoxLayout()
         self.dir_label = QLineEdit(self.config.get("download_directory", ""))
         self.dir_label.setReadOnly(True)
@@ -266,7 +293,6 @@ class SettingsDialog(QDialog):
         dir_layout.addWidget(browse_button)
         self.layout.addLayout(dir_layout)
         
-        # Filename Numbering
         numbering_group = QGroupBox("Filename Numbering")
         num_layout = QVBoxLayout()
         self.rb_num_none = QRadioButton("None")
@@ -278,7 +304,6 @@ class SettingsDialog(QDialog):
         numbering_group.setLayout(num_layout)
         self.layout.addWidget(numbering_group)
 
-        # Filename Name Order
         order_group = QGroupBox("Filename Name Order")
         order_layout = QVBoxLayout()
         self.rb_order_track_artist = QRadioButton("Track Name - Artist Name")
@@ -302,22 +327,20 @@ class SettingsDialog(QDialog):
             self.config["download_directory"] = directory
 
     def load_settings(self):
-        # Numbering
         num_setting = self.config.get("numbering", "playlist_order")
         if num_setting == "none": self.rb_num_none.setChecked(True)
         elif num_setting == "release_year": self.rb_num_release.setChecked(True)
         else: self.rb_num_playlist.setChecked(True)
-        # Order
+        
         order_setting = self.config.get("name_order", "track_artist")
         if order_setting == "artist_track": self.rb_order_artist_track.setChecked(True)
         else: self.rb_order_track_artist.setChecked(True)
 
     def accept(self):
-        # Save Numbering
         if self.rb_num_none.isChecked(): self.config["numbering"] = "none"
         elif self.rb_num_release.isChecked(): self.config["numbering"] = "release_year"
         else: self.config["numbering"] = "playlist_order"
-        # Save Order
+        
         if self.rb_order_artist_track.isChecked(): self.config["name_order"] = "artist_track"
         else: self.config["name_order"] = "track_artist"
         
@@ -327,10 +350,16 @@ class SettingsDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        print("MainWindow __init__ started.")
         self.setWindowTitle("Rekordbox YT Music Bridge")
         self.setGeometry(100, 100, 1200, 800)
+        
+        print("Initializing handlers...")
         self.youtube_handler = YouTubeHandler()
+        print("YouTubeHandler initialized.")
         self.microplaylist_handler = MicroPlaylistHandler()
+        print("MicroPlaylistHandler initialized.")
+
         self.playlists = {}
         self.downloader = None
         self.playlists_file = "playlists.json"
@@ -338,15 +367,27 @@ class MainWindow(QMainWindow):
         self.config = {}
         self.expanded_folders = set()
         
+        print("Loading config...")
         self.load_config()
-        self.file_manager = FileManager(self.config)
-        self.track_checker = TrackChecker(self.file_manager, self.config.get("download_directory"))
+        print("Config loaded.")
 
+        self.file_manager = FileManager(self.config)
+        print("FileManager initialized.")
+        self.track_checker = TrackChecker(self.file_manager, self.config.get("download_directory"))
+        print("TrackChecker initialized.")
+
+        print("Setting up UI...")
         self.setup_ui()
+        print("UI setup finished.")
+
+        print("Loading playlists...")
         self.load_playlists()
+        print("Playlists loaded.")
+
         self.update_login_button_state()
         if self.youtube_handler.is_authenticated():
             self.fetch_all_user_playlists()
+        print("MainWindow initialization finished.")
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -428,10 +469,14 @@ class MainWindow(QMainWindow):
 
         reformat_button = QPushButton("Reformat Files")
         reformat_button.clicked.connect(self.reformat_filenames)
+        
+        self.full_refresh_button = QPushButton("Full Refresh")
+        self.full_refresh_button.clicked.connect(self.start_full_sync)
 
         controls_layout.addWidget(self.login_logout_button)
         controls_layout.addWidget(settings_button)
         controls_layout.addWidget(reformat_button)
+        controls_layout.addWidget(self.full_refresh_button)
         controls_layout.addStretch()
 
         self.logged_out_label = QLabel("Login to sync your YouTube playlists.")
@@ -505,17 +550,14 @@ class MainWindow(QMainWindow):
     def open_settings_dialog(self):
         dialog = SettingsDialog(self.config, self)
         if dialog.exec():
-            # Check if download directory or filename format changed
             old_config = self.config
             self.config = dialog.config
             self.save_config()
-            self.file_manager.config = self.config # Update file manager's config
+            self.file_manager.config = self.config
 
-            # If download directory changed, re-initialize the track checker
             if old_config.get("download_directory") != self.config.get("download_directory"):
                 self.track_checker = TrackChecker(self.file_manager, self.config.get("download_directory"))
 
-            # Refresh the current view to reflect potential status changes
             current_playlist_item = self.playlist_tree.currentItem()
             if current_playlist_item:
                 self.display_tracks(current_playlist_item, None)
@@ -527,13 +569,16 @@ class MainWindow(QMainWindow):
 
     def reformat_filenames(self):
         current_item = self.playlist_tree.currentItem()
-        if not current_item or not current_item.data(0, Qt.ItemDataRole.UserRole):
+        if not current_item:
             QMessageBox.warning(self, "No Playlist Selected", "Please select a synced playlist to reformat.")
             return
 
-        item_type, p_id = current_item.data(0, Qt.ItemDataRole.UserRole)
-        if item_type != 'playlist':
+        user_data = current_item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(user_data, tuple) or len(user_data) != 2 or user_data[0] != 'playlist':
+            QMessageBox.warning(self, "No Playlist Selected", "Please select a synced playlist to reformat.")
             return
+        
+        item_type, p_id = user_data
             
         reply = QMessageBox.question(self, "Confirm Reformat", 
                                      "This will rename all downloaded files in the selected playlist according to the current settings. "
@@ -554,20 +599,6 @@ class MainWindow(QMainWindow):
         renamed_count = 0
         error_count = 0
 
-        all_tracks = []
-        # Gather tracks from microplaylists
-        micro_tracks_map, remaining_tracks_map = self.microplaylist_handler.segregate_tracks(self.playlists)
-        for (pl_id, mp_name), tracks in micro_tracks_map.items():
-            if pl_id == p_id:
-                for track in tracks:
-                    track['microplaylist_name'] = mp_name
-                all_tracks.extend(tracks)
-        # Gather remaining tracks
-        for track in remaining_tracks_map.get(p_id, []):
-            track['microplaylist_name'] = None
-        all_tracks.extend(remaining_tracks_map.get(p_id, []))
-
-
         for i, track_data in enumerate(playlist_info.get("tracks", [])):
             microplaylist_name = track_data.get('microplaylist_name')
             old_filepath = self.track_checker.is_downloaded(track_data, playlist_info, microplaylist_name)
@@ -579,11 +610,11 @@ class MainWindow(QMainWindow):
 
                 if old_filepath != new_filepath:
                     try:
-                        if not os.path.exists(new_filepath): # Avoid overwriting
+                        if not os.path.exists(new_filepath):
                             os.rename(old_filepath, new_filepath)
                             renamed_count += 1
                         else:
-                            error_count += 1 # Or handle as a conflict
+                            error_count += 1
                     except OSError:
                         error_count += 1
         
@@ -593,10 +624,12 @@ class MainWindow(QMainWindow):
 
     def open_create_micro_dialog(self):
         current_item = self.playlist_tree.currentItem()
-        if not current_item or not current_item.data(0, Qt.ItemDataRole.UserRole): return
+        if not current_item: return
         
-        item_type, playlist_id = current_item.data(0, Qt.ItemDataRole.UserRole)
-        if item_type != 'playlist': return
+        user_data = current_item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(user_data, tuple) or len(user_data) != 2 or user_data[0] != 'playlist': return
+
+        item_type, playlist_id = user_data
 
         all_tracks = self.playlists.get(playlist_id, {}).get('tracks', [])
         dialog = CreateMicroPlaylistDialog(playlist_id, all_tracks, self.microplaylist_handler, self)
@@ -651,8 +684,11 @@ class MainWindow(QMainWindow):
     def refresh_playlist_tree(self):
         current_selection = self.playlist_tree.currentItem()
         selected_id = None
-        if current_selection and current_selection.data(0, Qt.ItemDataRole.UserRole):
-            _, selected_id = current_selection.data(0, Qt.ItemDataRole.UserRole)
+
+        if current_selection:
+            user_data = current_selection.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(user_data, tuple) and len(user_data) == 2 and user_data[0] == 'playlist':
+                _, selected_id = user_data
 
         self.playlist_tree.clear()
 
@@ -665,7 +701,7 @@ class MainWindow(QMainWindow):
         self.user_playlists_item.setFlags(self.user_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         
         new_item_to_select = None
-        for p_id, p_data in self.playlists.items():
+        for p_id, p_data in sorted(self.playlists.items(), key=lambda item: item[1].get('title', '').lower()):
             playlist_item = QTreeWidgetItem(self.synced_playlists_item)
             playlist_item.setText(0, p_data.get('title', 'Untitled Playlist'))
             playlist_item.setData(0, Qt.ItemDataRole.UserRole, ('playlist', p_id))
@@ -695,21 +731,26 @@ class MainWindow(QMainWindow):
             self.display_tracks(current_item, None)
 
     def display_tracks(self, current, previous):
-        is_synced_playlist = current is not None and current.parent() == self.synced_playlists_item
+        self.tracks_tree.clear()
+        
+        if not current:
+            self.create_micro_button.setEnabled(False)
+            return
+
+        user_data = current.data(0, Qt.ItemDataRole.UserRole)
+        is_synced_playlist = isinstance(user_data, tuple) and len(user_data) == 2 and user_data[0] == 'playlist'
+        
         self.create_micro_button.setEnabled(is_synced_playlist)
         self.edit_micro_button.setEnabled(False)
         self.delete_micro_button.setEnabled(False)
-        self.tracks_tree.clear()
-        
-        if not current or not current.data(0, Qt.ItemDataRole.UserRole): return
-        
-        item_type, p_id = current.data(0, Qt.ItemDataRole.UserRole)
-        if item_type != 'playlist': return
 
+        if not is_synced_playlist:
+            return
+        
+        item_type, p_id = user_data
+        
         self.track_checker.rescan()
-
         micro_tracks_map, remaining_tracks_map = self.microplaylist_handler.segregate_tracks(self.playlists)
-        
         sort_key = self.sort_combo.currentText()
 
         def get_sort_key_func(track):
@@ -717,10 +758,10 @@ class MainWindow(QMainWindow):
                 return track.get('title', 'N/A').lower()
             elif sort_key == "Artist Name":
                 artists = track.get('artists', [])
-                if artists:
+                if artists and artists[0] is not None:
                     return artists[0].get('name', 'N/A').lower()
                 return 'N/A'
-            return None # "Date Added" is default, no key needed
+            return None
 
         def sort_tracks(tracks):
             if sort_key == "Date Added":
@@ -731,13 +772,13 @@ class MainWindow(QMainWindow):
         seen_video_ids = set()
 
         def add_track_to_tree(parent_item, track, micro_name=None):
-            if track['videoId'] in seen_video_ids:
+            if track.get('videoId') in seen_video_ids:
                 return
-            seen_video_ids.add(track['videoId'])
+            seen_video_ids.add(track.get('videoId'))
             
             track_item = QTreeWidgetItem(parent_item)
             track_item.setText(0, track.get('title', 'N/A'))
-            artists = ", ".join([a['name'].replace(' - Topic', '').strip() for a in track.get('artists', []) if 'name' in a])
+            artists = ", ".join([a['name'].replace(' - Topic', '').strip() for a in track.get('artists', []) if a and 'name' in a])
             track_item.setText(1, artists)
             
             playlist_info = self.playlists.get(p_id)
@@ -790,16 +831,17 @@ class MainWindow(QMainWindow):
         unique_ids = set()
         
         current_playlist_item = self.playlist_tree.currentItem()
-        if not current_playlist_item or not current_playlist_item.data(0, Qt.ItemDataRole.UserRole): return
-        
-        item_type, p_id = current_playlist_item.data(0, Qt.ItemDataRole.UserRole)
-        if item_type != 'playlist': return
+        if not current_playlist_item: return
 
+        user_data = current_playlist_item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(user_data, tuple) or len(user_data) != 2 or user_data[0] != 'playlist': return
+
+        item_type, p_id = user_data
         playlist_info = self.playlists.get(p_id)
         
         def process_track(track_data, micro_name=None):
-            video_id = track_data['videoId']
-            if video_id not in unique_ids:
+            video_id = track_data.get('videoId')
+            if video_id and video_id not in unique_ids:
                 if not self.track_checker.is_downloaded(track_data, playlist_info, micro_name):
                     track_data['playlist_title'] = playlist_info.get('title')
                     track_data['microplaylist_title'] = micro_name
@@ -844,7 +886,6 @@ class MainWindow(QMainWindow):
             with open(self.playlists_file, 'r', encoding='utf-8') as f:
                 self.playlists = json.load(f)
             self.refresh_playlist_tree()
-            self.check_for_updates()
 
     def save_playlists(self):
         with open(self.playlists_file, 'w', encoding='utf-8') as f:
@@ -859,6 +900,7 @@ class MainWindow(QMainWindow):
         self.login_logout_button.setText("Logout" if is_auth else "Login with Google")
         self.logged_out_label.setVisible(not is_auth)
         self.user_playlists_item.setHidden(not is_auth)
+        self.full_refresh_button.setEnabled(is_auth)
 
     def login(self):
         self.status_label.setText("Attempting to log in... Please follow the instructions in your browser.")
@@ -889,7 +931,8 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Error: {user_playlists['error']}")
             return
         grey_brush = QBrush(QColor("grey"))
-        for playlist in user_playlists:
+        sorted_playlists = sorted(user_playlists, key=lambda p: p.get('title', '').lower())
+        for playlist in sorted_playlists:
             if playlist['id'] not in self.playlists:
                 item = QTreeWidgetItem(self.user_playlists_item)
                 icon = {"public": "👁️", "private": "🔒", "unlisted": "🔗"}.get(playlist['privacyStatus'], "")
@@ -904,8 +947,9 @@ class MainWindow(QMainWindow):
             data = item.data(0, Qt.ItemDataRole.UserRole)
             pid = data['id']
             is_private = data['privacyStatus'] != 'public'
-            self.status_label.setText(f"Fetching full data for {data['title']}...")
+            self.status_label.setText(f"Syncing {data['title']}...")
             QApplication.processEvents()
+
             full_data = self.youtube_handler.get_playlist_info(pid, is_private)
             if full_data and 'error' not in full_data:
                 full_data['is_private'] = is_private
@@ -914,13 +958,16 @@ class MainWindow(QMainWindow):
                 self.refresh_playlist_tree()
                 self.status_label.setText(f"Synced: {full_data['title']}")
             else:
-                self.status_label.setText(f"Error: {full_data.get('error', 'Unknown')}")
+                self.status_label.setText(f"Error syncing playlist: {full_data.get('error', 'Unknown')}")
 
     def add_playlist(self):
         url, ok = QInputDialog.getText(self, 'Add Playlist by URL', 'URL:')
         if ok and url:
             pid = self.extract_playlist_id(url)
             if pid:
+                if pid in self.playlists:
+                    self.status_label.setText("This playlist is already synced.")
+                    return
                 self.status_label.setText(f"Fetching: {pid}...")
                 data = self.youtube_handler.get_playlist_info(pid, is_private=False)
                 if data and 'error' not in data:
@@ -928,56 +975,70 @@ class MainWindow(QMainWindow):
                     self.playlists[pid] = data
                     self.save_playlists()
                     self.refresh_playlist_tree()
-                else: self.status_label.setText("Error: Could not fetch playlist.")
+                else: self.status_label.setText("Error: Could not fetch playlist. It may be private.")
             else: self.status_label.setText("Error: Invalid URL.")
 
     def remove_playlist(self):
         current = self.playlist_tree.currentItem()
         if current and current.parent() == self.synced_playlists_item:
-            data = current.data(0, Qt.ItemDataRole.UserRole)
-            if data and data[0] == 'playlist':
-                pid = data[1]
+            user_data = current.data(0, Qt.ItemDataRole.UserRole)
+            if user_data and user_data[0] == 'playlist':
+                pid = user_data[1]
+                playlist_title = self.playlists.get(pid, {}).get('title', 'this playlist')
+                reply = QMessageBox.question(self, "Confirm Removal", f"Are you sure you want to remove '{playlist_title}' from the synced list?")
+                if reply == QMessageBox.StandardButton.No:
+                    return
+
                 if pid in self.playlists:
                     del self.playlists[pid]
-                    if pid in self.microplaylist_handler.microplaylists:
-                        del self.microplaylist_handler.microplaylists[pid]
-                        self.microplaylist_handler.save_microplaylists()
-                    self.save_playlists()
-                    self.refresh_playlist_tree()
-                    self.tracks_tree.clear()
+                if pid in self.microplaylist_handler.microplaylists:
+                    del self.microplaylist_handler.microplaylists[pid]
+                    self.microplaylist_handler.save_microplaylists()
+                
+                self.save_playlists()
+                self.refresh_playlist_tree()
+                self.tracks_tree.clear()
 
-    def check_for_updates(self):
+    def start_full_sync(self):
         if not self.youtube_handler.is_authenticated():
-            self.status_label.setText("Please log in to check for updates.")
+            self.status_label.setText("Please log in to run a full refresh.")
             return
-        self.status_label.setText("Checking for updates...")
-        self.sync_thread = SyncThread(self.youtube_handler, self.playlists)
-        self.sync_thread.sync_finished.connect(self.on_sync_finished)
-        self.sync_thread.start()
+        if not self.playlists:
+            self.status_label.setText("No playlists to sync.")
+            return
+            
+        self.status_label.setText("Starting full refresh... This may take a moment.")
+        self.full_refresh_button.setEnabled(False)
+        
+        self.full_sync_thread = FullSyncThread(self.youtube_handler, self.playlists)
+        self.full_sync_thread.sync_finished.connect(self.on_full_sync_finished)
+        self.full_sync_thread.start()
 
-    def on_sync_finished(self, updated_data):
-        summary = []
-        for pid, new_data in updated_data.items():
+    def on_full_sync_finished(self, updated_data, summary):
+        self.playlists.update(updated_data)
+        # Remove playlists that were not in the updated data (e.g., deleted online)
+        current_ids = set(updated_data.keys())
+        existing_ids = set(self.playlists.keys())
+        for pid in existing_ids - current_ids:
             if pid in self.playlists:
-                old_ids = {t['videoId'] for t in self.playlists[pid].get('tracks', [])}
-                new_ids = {t['videoId'] for t in new_data.get('tracks', [])}
-                count = len(new_ids - old_ids)
-                if count > 0:
-                    summary.append(f"'{new_data.get('title', '...')[:30]}...': {count} new song(s)")
-            self.playlists[pid] = new_data
-            QApplication.processEvents()
-        if summary:
-            QMessageBox.information(self, "Updates Found", "\\n".join(summary))
-        self.status_label.setText("Sync complete.")
+                del self.playlists[pid]
+
         self.save_playlists()
         self.refresh_playlist_tree()
+        self.full_refresh_button.setEnabled(True)
+        self.status_label.setText("Full refresh complete.")
+
+        if summary:
+            QMessageBox.information(self, "Refresh Complete", "\\n".join(summary))
+        else:
+            QMessageBox.information(self, "Refresh Complete", "No new songs found, but playlist details have been updated.")
 
     def update_track_status(self, video_id, status, percentage):
         iterator = QTreeWidgetItemIterator(self.tracks_tree)
         while iterator.value():
             item = iterator.value()
             data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data and data[0] == 'track' and data[1]['videoId'] == video_id:
+            if data and data[0] == 'track' and data[1].get('videoId') == video_id:
                 item.setText(2, f"{status} ({percentage}%)")
                 break
             iterator += 1
@@ -987,8 +1048,11 @@ class MainWindow(QMainWindow):
         while iterator.value():
             item = iterator.value()
             data = item.data(0, Qt.ItemDataRole.UserRole)
-            if data and data[0] == 'track' and data[1]['videoId'] == video_id:
+            if data and data[0] == 'track' and data[1].get('videoId') == video_id:
                 item.setText(2, "Downloaded" if success else f"Error: {message}")
+                if success:
+                    current_playlist_item = self.playlist_tree.currentItem()
+                    self.display_tracks(current_playlist_item, None)
                 break
             iterator += 1
     
@@ -1016,9 +1080,47 @@ class MainWindow(QMainWindow):
         match = re.search(r"list=([a-zA-Z0-9_-]+)", url)
         return match.group(1) if match else None
 
+    # --- NEW: Graceful Shutdown Method ---
+    def closeEvent(self, event):
+        """Ensure threads are stopped gracefully before the application closes."""
+        running_threads = []
+        
+        # Check downloader thread
+        if self.downloader and self.downloader.isRunning():
+            # In a real-world app you might want to ask the user if they want to cancel downloads
+            running_threads.append(self.downloader)
+
+        # Check other utility threads
+        if hasattr(self, 'login_thread') and self.login_thread.isRunning():
+            running_threads.append(self.login_thread)
+        if hasattr(self, 'fetch_playlists_thread') and self.fetch_playlists_thread.isRunning():
+            running_threads.append(self.fetch_playlists_thread)
+        if hasattr(self, 'full_sync_thread') and self.full_sync_thread.isRunning():
+            running_threads.append(self.full_sync_thread)
+
+        if running_threads:
+            print("Waiting for background tasks to finish before closing...")
+            self.status_label.setText("Finishing background tasks...")
+            # Disable the main window to prevent user interaction during shutdown
+            self.setEnabled(False)
+            QApplication.processEvents()
+            
+            for thread in running_threads:
+                thread.quit()
+                thread.wait(5000) # Wait up to 5 seconds for each thread
+
+        event.accept() # Now it's safe to close
+
 if __name__ == "__main__":
+    print("Starting application...")
     app = QApplication(sys.argv)
+    print("QApplication created.")
     app.setStyleSheet(qdarkstyle.load_stylesheet() + STYLE_SHEET)
+    print("Stylesheet set.")
     window = MainWindow()
+    print("MainWindow created.")
     window.show()
-    sys.exit(app.exec())
+    print("MainWindow shown.")
+    exit_code = app.exec()
+    print(f"Application finished with exit code {exit_code}.")
+    sys.exit(exit_code)
