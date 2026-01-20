@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices
 
-from youtube_handler import YouTubeHandler
+from youtube_handler import YouTubeHandler as CloudHandler
 from microplaylist_handler import MicroPlaylistHandler
 from file_manager import FileManager
 from download_handler import DownloadHandler
@@ -23,32 +23,32 @@ from styling import STYLE_SHEET
 # --- Worker Threads ---
 class LoginThread(QThread):
     auth_finished = pyqtSignal(str)
-    def __init__(self, youtube_handler):
+    def __init__(self, cloud_handler):
         super().__init__()
-        self.youtube_handler = youtube_handler
+        self.cloud_handler = cloud_handler
     def run(self):
-        result = self.youtube_handler.authenticate()
+        result = self.cloud_handler.authenticate()
         self.auth_finished.emit(result)
 
 class FetchAllPlaylistsThread(QThread):
     fetch_finished = pyqtSignal(object)
-    def __init__(self, youtube_handler):
+    def __init__(self, cloud_handler):
         super().__init__()
-        self.youtube_handler = youtube_handler
+        self.cloud_handler = cloud_handler
     def run(self):
-        playlists = self.youtube_handler.get_all_user_playlists()
+        playlists = self.cloud_handler.get_all_user_playlists()
         self.fetch_finished.emit(playlists)
 
 class FullSyncThread(QThread):
     sync_finished = pyqtSignal(dict, list)
 
-    def __init__(self, youtube_handler, playlists_to_sync):
+    def __init__(self, cloud_handler, playlists_to_sync):
         super().__init__()
-        self.youtube_handler = youtube_handler
+        self.cloud_handler = cloud_handler
         self.playlists_to_sync = playlists_to_sync
 
     def run(self):
-        live_user_playlists = self.youtube_handler.get_all_user_playlists()
+        live_user_playlists = self.cloud_handler.get_all_user_playlists()
         if 'error' in live_user_playlists:
             self.sync_finished.emit({}, [f"Error fetching playlists: {live_user_playlists['error']}"])
             return
@@ -65,7 +65,7 @@ class FullSyncThread(QThread):
             live_data = live_playlist_map[playlist_id]
             is_now_private = live_data['privacyStatus'] != 'public'
             
-            new_data = self.youtube_handler.get_playlist_info(playlist_id, is_now_private)
+            new_data = self.cloud_handler.get_playlist_info(playlist_id, is_now_private)
             
             if new_data and 'error' not in new_data:
                 old_ids = {t['videoId'] for t in old_playlist_data.get('tracks', [])}
@@ -351,12 +351,12 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         print("MainWindow __init__ started.")
-        self.setWindowTitle("Rekordbox YT Music Bridge")
+        self.setWindowTitle("DJ Library Sync Bridge")
         self.setGeometry(100, 100, 1200, 800)
         
         print("Initializing handlers...")
-        self.youtube_handler = YouTubeHandler()
-        print("YouTubeHandler initialized.")
+        self.cloud_handler = CloudHandler()
+        print("CloudHandler initialized.")
         self.microplaylist_handler = MicroPlaylistHandler()
         print("MicroPlaylistHandler initialized.")
 
@@ -385,7 +385,7 @@ class MainWindow(QMainWindow):
         print("Playlists loaded.")
 
         self.update_login_button_state()
-        if self.youtube_handler.is_authenticated():
+        if self.cloud_handler.is_authenticated():
             self.fetch_all_user_playlists()
         print("MainWindow initialization finished.")
 
@@ -407,7 +407,7 @@ class MainWindow(QMainWindow):
         self.synced_playlists_item.setText(0, "Synced Playlists")
         self.synced_playlists_item.setFlags(self.synced_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         self.user_playlists_item = QTreeWidgetItem(self.playlist_tree)
-        self.user_playlists_item.setText(0, "My YouTube Playlists")
+        self.user_playlists_item.setText(0, "Cloud Playlists")
         self.user_playlists_item.setFlags(self.user_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         
         playlist_buttons_layout = QHBoxLayout()
@@ -479,11 +479,11 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.full_refresh_button)
         controls_layout.addStretch()
 
-        self.logged_out_label = QLabel("Login to sync your YouTube playlists.")
+        self.logged_out_label = QLabel("Login to sync your cloud playlists.")
         self.logged_out_label.setStyleSheet("color: #888;")
         controls_layout.addWidget(self.logged_out_label)
         
-        self.download_button = QPushButton("Download Selected")
+        self.download_button = QPushButton("Cache Selected")
         self.download_button.clicked.connect(self.start_download)
         controls_layout.addWidget(self.download_button)
         self.progress_bar = QProgressBar()
@@ -697,7 +697,7 @@ class MainWindow(QMainWindow):
         self.synced_playlists_item.setFlags(self.synced_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         
         self.user_playlists_item = QTreeWidgetItem(self.playlist_tree)
-        self.user_playlists_item.setText(0, "My YouTube Playlists")
+        self.user_playlists_item.setText(0, "Cloud Playlists")
         self.user_playlists_item.setFlags(self.user_playlists_item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         
         new_item_to_select = None
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
             if p_id == selected_id:
                 new_item_to_select = playlist_item
 
-        if self.youtube_handler.is_authenticated():
+        if self.cloud_handler.is_authenticated():
             self.fetch_all_user_playlists()
         
         self.playlist_tree.expandAll()
@@ -892,19 +892,19 @@ class MainWindow(QMainWindow):
             json.dump(self.playlists, f, indent=4)
 
     def toggle_login_logout(self):
-        if self.youtube_handler.is_authenticated(): self.logout()
+        if self.cloud_handler.is_authenticated(): self.logout()
         else: self.login()
     
     def update_login_button_state(self):
-        is_auth = self.youtube_handler.is_authenticated()
-        self.login_logout_button.setText("Logout" if is_auth else "Login with Google")
+        is_auth = self.cloud_handler.is_authenticated()
+        self.login_logout_button.setText("Logout" if is_auth else "Login with Cloud")
         self.logged_out_label.setVisible(not is_auth)
         self.user_playlists_item.setHidden(not is_auth)
         self.full_refresh_button.setEnabled(is_auth)
 
     def login(self):
         self.status_label.setText("Attempting to log in... Please follow the instructions in your browser.")
-        self.login_thread = LoginThread(self.youtube_handler)
+        self.login_thread = LoginThread(self.cloud_handler)
         self.login_thread.auth_finished.connect(self.on_login_finished)
         self.login_thread.start()
 
@@ -914,14 +914,14 @@ class MainWindow(QMainWindow):
         if "successful" in result: self.fetch_all_user_playlists()
 
     def logout(self):
-        self.youtube_handler.logout()
+        self.cloud_handler.logout()
         self.update_login_button_state()
         self.status_label.setText("Logged out.")
         self.refresh_playlist_tree()
 
     def fetch_all_user_playlists(self):
-        self.status_label.setText("Fetching your YouTube playlists...")
-        self.fetch_playlists_thread = FetchAllPlaylistsThread(self.youtube_handler)
+        self.status_label.setText("Fetching your cloud playlists...")
+        self.fetch_playlists_thread = FetchAllPlaylistsThread(self.cloud_handler)
         self.fetch_playlists_thread.fetch_finished.connect(self.populate_user_playlists)
         self.fetch_playlists_thread.start()
 
@@ -950,7 +950,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"Syncing {data['title']}...")
             QApplication.processEvents()
 
-            full_data = self.youtube_handler.get_playlist_info(pid, is_private)
+            full_data = self.cloud_handler.get_playlist_info(pid, is_private)
             if full_data and 'error' not in full_data:
                 full_data['is_private'] = is_private
                 self.playlists[pid] = full_data
@@ -969,7 +969,7 @@ class MainWindow(QMainWindow):
                     self.status_label.setText("This playlist is already synced.")
                     return
                 self.status_label.setText(f"Fetching: {pid}...")
-                data = self.youtube_handler.get_playlist_info(pid, is_private=False)
+                data = self.cloud_handler.get_playlist_info(pid, is_private=False)
                 if data and 'error' not in data:
                     data['is_private'] = False
                     self.playlists[pid] = data
@@ -1000,7 +1000,7 @@ class MainWindow(QMainWindow):
                 self.tracks_tree.clear()
 
     def start_full_sync(self):
-        if not self.youtube_handler.is_authenticated():
+        if not self.cloud_handler.is_authenticated():
             self.status_label.setText("Please log in to run a full refresh.")
             return
         if not self.playlists:
@@ -1010,7 +1010,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Starting full refresh... This may take a moment.")
         self.full_refresh_button.setEnabled(False)
         
-        self.full_sync_thread = FullSyncThread(self.youtube_handler, self.playlists)
+        self.full_sync_thread = FullSyncThread(self.cloud_handler, self.playlists)
         self.full_sync_thread.sync_finished.connect(self.on_full_sync_finished)
         self.full_sync_thread.start()
 
@@ -1029,7 +1029,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Full refresh complete.")
 
         if summary:
-            QMessageBox.information(self, "Refresh Complete", "\\n".join(summary))
+            QMessageBox.information(self, "Refresh Complete", "\n".join(summary))
         else:
             QMessageBox.information(self, "Refresh Complete", "No new songs found, but playlist details have been updated.")
 
